@@ -104,8 +104,18 @@ class Agent:
                     # Check if this looks like a JSON tool call (don't stream it)
                     # Some models output tool calls as JSON in content
                     stripped = response_content.strip()
-                    if stripped.startswith("{") and '"name"' in stripped:
-                        looks_like_tool_call = True
+                    # Detect various stages of JSON tool call output
+                    # Be aggressive about not streaming potential JSON tool calls
+                    if stripped.startswith("{"):
+                        # If we see clear signs of a tool call
+                        if ('"name"' in stripped or
+                            '"name' in stripped or  # Partial quote
+                            'name":' in stripped or
+                            '"arguments"' in stripped):
+                            looks_like_tool_call = True
+                        # If it's very short and starts with JSON, wait to see more
+                        elif len(stripped) < 80:
+                            looks_like_tool_call = True
 
                     # Only stream if it doesn't look like a tool call
                     if not looks_like_tool_call:
@@ -220,6 +230,40 @@ class Agent:
             else:
                 # No tool calls - this is a final response
                 if response_content:
+                    # Check if this looks like a failed/incomplete tool call attempt
+                    stripped = response_content.strip()
+                    is_truncated_json = (
+                        stripped.startswith("{") and (
+                            '"name"' in stripped or
+                            '"name' in stripped or  # Incomplete JSON
+                            'name":' in stripped
+                        ) and
+                        not stripped.endswith("}")  # Not a complete JSON object
+                    )
+
+                    # Also check for suspiciously short responses that start with JSON
+                    is_very_short = len(stripped) < 100 and stripped.startswith("{")
+
+                    if is_truncated_json or is_very_short:
+                        # This looks like a malformed/truncated tool call
+                        self.console.print_warning(
+                            f"Model response appears truncated ({len(stripped)} chars). Retrying..."
+                        )
+                        # Add a hint to the conversation to help the model
+                        self.messages.append(
+                            Message(role="assistant", content=response_content)
+                        )
+                        self.messages.append(
+                            Message(
+                                role="user",
+                                content="Your previous response was incomplete or truncated. "
+                                        "Please provide a complete response - either respond with text "
+                                        "explaining what you'll do, or use a tool with valid JSON."
+                            )
+                        )
+                        # Continue the loop to retry
+                        continue
+
                     # Only print if we didn't already stream it
                     # (finish_streaming already rendered the content)
                     if not streaming_started:

@@ -190,8 +190,28 @@ async def run_repl(
             if cmd == "/approve":
                 plan_manager = PlanManager()
                 if plan_manager.has_pending_plan():
+                    # Get the plan before approving (we need it to tell agent what to execute)
+                    plan = plan_manager.get_plan()
                     plan_manager.approve_plan()
                     console.print_plan_approved()
+
+                    # Now tell the agent to execute the approved plan
+                    if plan:
+                        execution_prompt = (
+                            "The plan has been approved. Please execute the plan now.\n\n"
+                            f"{plan.to_markdown()}\n\n"
+                            "Begin executing each step. Mark tasks as in_progress when you start them "
+                            "and completed when done."
+                        )
+                        await agent.process_message(execution_prompt)
+
+                        # Auto-save after execution
+                        session_id = session_manager.save_session(
+                            agent.messages,
+                            settings.model,
+                            current_session_id,
+                        )
+                        current_session_id = session_id
                 else:
                     console.print_warning("No pending plan to approve.")
                 continue
@@ -277,8 +297,7 @@ async def run_repl(
                 console.print_info(f"Switched to model: {new_model}")
                 continue
 
-            # Process the message
-            console.print_user_message(user_input)
+            # Process the message (user already sees their input at the prompt)
             await agent.process_message(user_input)
 
             # Auto-save after each message
@@ -380,7 +399,8 @@ def main(
                 settings=settings,
             )
 
-            console.print_user_message(prompt)
+            # In single-prompt mode, show what we're processing
+            console.print_info(f"> {prompt}")
             await agent.process_message(prompt)
 
         try:

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Model parameters
     temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="Sampling temperature")
-    num_ctx: int = Field(default=32768, description="Context window size")
+    num_ctx: int = Field(default=16384, description="Context window size")
 
     # Safety settings
     confirm_writes: bool = Field(default=True, description="Require confirmation for file writes")
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 # Model configurations for different models
 MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "qwen2.5-coder:32b": {
-        "context_length": 32768,
+        "context_length": 16384,  # Model's actual default context
         "supports_tools": True,
         "temperature": 0.3,
     },
