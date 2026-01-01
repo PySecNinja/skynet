@@ -8,6 +8,7 @@ import click
 
 from claude_clone.config import Settings
 from claude_clone.core.agent import Agent
+from claude_clone.core.plan import PlanManager
 from claude_clone.core.session import SessionManager
 from claude_clone.llm.ollama_provider import Message, OllamaProvider
 from claude_clone.tools.registry import ToolRegistry
@@ -21,8 +22,22 @@ def get_system_prompt(cwd: Path) -> str:
 - Execute shell commands
 - Search through code using grep and glob patterns
 - Perform git operations
+- Track tasks with todo_write
 
 Current working directory: {cwd}
+
+IMPORTANT - When to use tools:
+- ONLY use tools when the user asks you to perform an action that requires them
+- For simple questions, greetings, or conversations - just respond normally WITHOUT tools
+- Do NOT use web_search unless the user explicitly asks you to search the web
+- Do NOT use tools to "gather information" before responding to simple messages
+
+Task Tracking (todo_write):
+- Use todo_write for complex multi-step tasks (3+ steps)
+- Create a task list BEFORE starting work on complex tasks
+- Mark tasks as in_progress when you begin them (only ONE at a time)
+- Mark tasks as completed immediately when done
+- This helps users see your progress on longer tasks
 
 When using tools:
 - Always use absolute paths or paths relative to the current working directory
@@ -101,7 +116,7 @@ async def run_repl(
     # Main loop
     while True:
         try:
-            user_input = console.get_input("\n> ")
+            user_input = await console.get_input_async("\n> ")
 
             if not user_input.strip():
                 continue
@@ -131,8 +146,54 @@ async def run_repl(
                     "  /resume <id> - Resume a specific session\n"
                     "  /models - List available models\n"
                     "  /model <name|number> - Switch model\n"
+                    "  /todos - Show current task list\n"
+                    "  /context - Show token usage\n"
+                    "  /plan - Enter plan mode (create plan before executing)\n"
+                    "  /approve - Approve pending plan\n"
+                    "  /reject - Reject pending plan\n"
                     "  /help - Show this help"
                 )
+                continue
+
+            if cmd == "/todos":
+                console.print_todos()
+                continue
+
+            if cmd == "/context":
+                usage = agent.get_context_usage()
+                console.print_context_usage(usage.used, usage.max_tokens, usage.percent)
+                continue
+
+            if cmd == "/plan":
+                plan_manager = PlanManager()
+                if plan_manager.is_active():
+                    # Toggle off if already active
+                    plan_manager.end_plan_mode()
+                    console.print_plan_mode_status(False)
+                else:
+                    plan_manager.start_plan_mode()
+                    console.print_plan_mode_status(True)
+                continue
+
+            if cmd == "/approve":
+                plan_manager = PlanManager()
+                if plan_manager.has_pending_plan():
+                    plan_manager.approve_plan()
+                    console.print_plan_approved()
+                else:
+                    console.print_warning("No pending plan to approve.")
+                continue
+
+            if cmd == "/reject":
+                plan_manager = PlanManager()
+                if plan_manager.has_pending_plan():
+                    plan_manager.reject_plan()
+                    console.print_plan_rejected()
+                elif plan_manager.is_active():
+                    plan_manager.end_plan_mode()
+                    console.print_plan_mode_status(False)
+                else:
+                    console.print_warning("No pending plan to reject.")
                 continue
 
             if cmd == "/clear":

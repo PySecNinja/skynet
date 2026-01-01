@@ -17,6 +17,9 @@ A powerful local AI coding assistant CLI powered by Ollama. Like Claude Code, bu
 - **Web Search** - Search the web and fetch documentation
 - **Session Persistence** - Save and resume conversations
 - **Rich Terminal UI** - Markdown rendering, syntax highlighting, and more
+- **Context Management** - Auto-summarization to stay within context window limits
+- **Plan Mode** - Create and approve execution plans before implementation
+- **Task Tracking** - Track progress on multi-step tasks with the todo system
 
 ## Requirements
 
@@ -84,11 +87,16 @@ skynet --no-confirm
 | `/resume <id>` | Resume a specific session |
 | `/save` | Manually save current session |
 | `/clear` | Clear conversation history |
+| `/todos` | Show current task list |
+| `/context` | Show token usage and context window status |
+| `/plan` | Enter/exit plan mode |
+| `/approve` | Approve a pending execution plan |
+| `/reject` | Reject a pending plan or exit plan mode |
 | `/quit`, `/exit`, `/q` | Save and exit |
 
 ### Available Tools
 
-SkyNet has access to 12 tools:
+SkyNet has access to 14 tools:
 
 #### File Operations
 - `read_file` - Read file contents with line numbers
@@ -112,6 +120,10 @@ SkyNet has access to 12 tools:
 #### Web
 - `web_search` - Search the web via DuckDuckGo
 - `web_fetch` - Fetch and extract text from URLs
+
+#### Planning & Tasks
+- `todo_write` - Track progress on multi-step tasks
+- `create_plan` - Create execution plans for approval in plan mode
 
 ## Configuration
 
@@ -154,7 +166,10 @@ skynet/
         ├── config.py       # Configuration management
         ├── core/
         │   ├── agent.py    # Main orchestration loop
-        │   └── session.py  # Session persistence
+        │   ├── context.py  # Context window management and auto-summarization
+        │   ├── plan.py     # Plan mode state management
+        │   ├── session.py  # Session persistence
+        │   └── tokens.py   # Token counting utilities
         ├── llm/
         │   └── ollama_provider.py  # Ollama integration
         ├── tools/
@@ -164,10 +179,46 @@ skynet/
         │   ├── search.py   # Grep/glob tools
         │   ├── shell.py    # Bash tool
         │   ├── git.py      # Git tools
-        │   └── web.py      # Web search/fetch
+        │   ├── web.py      # Web search/fetch
+        │   ├── plan.py     # Plan creation tool
+        │   └── todo.py     # Task tracking tool
         └── ui/
             └── console.py  # Rich terminal UI
 ```
+
+## Plan Mode
+
+Plan mode provides a structured workflow for complex tasks:
+
+1. **Enter plan mode** with `/plan`
+2. **Explore the codebase** - Only read-only tools are allowed (read, grep, glob, git status, etc.)
+3. **Create a plan** - The AI uses `create_plan` to outline steps
+4. **Review and approve** - Use `/approve` to proceed or `/reject` to discard
+5. **Execute** - After approval, all tools are available for implementation
+
+This prevents the AI from making changes before you've reviewed the approach.
+
+```bash
+> /plan
+Plan mode activated. I'll explore and create a plan before making changes.
+
+> Add user authentication to the app
+
+# AI explores codebase, then creates a plan...
+
+> /approve
+Plan approved! Beginning execution...
+```
+
+## Context Management
+
+SkyNet automatically manages the context window to prevent token limit issues:
+
+- **Token Tracking** - Use `/context` to see current usage
+- **Auto-Summarization** - When context exceeds 75%, older messages are summarized
+- **Recent Preservation** - Recent exchanges are kept intact for continuity
+
+This allows for unlimited conversation length through automatic summarization.
 
 ## Safety Features
 

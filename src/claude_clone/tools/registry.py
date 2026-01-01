@@ -50,6 +50,8 @@ class ToolRegistry:
         )
         from claude_clone.tools.search import GlobTool, GrepTool
         from claude_clone.tools.shell import BashTool
+        from claude_clone.tools.plan import CreatePlanTool
+        from claude_clone.tools.todo import TodoWriteTool
         from claude_clone.tools.web import WebFetchTool, WebSearchTool
 
         # File operations
@@ -74,3 +76,9 @@ class ToolRegistry:
         # Web
         self.register(WebSearchTool())
         self.register(WebFetchTool())
+
+        # Task tracking
+        self.register(TodoWriteTool())
+
+        # Planning
+        self.register(CreatePlanTool())

@@ -1,10 +1,139 @@
 """Rich console wrapper for terminal output."""
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
+
+
+# Slash commands with descriptions
+SLASH_COMMANDS = {
+    "/help": "Show available commands",
+    "/quit": "Save and exit",
+    "/exit": "Save and exit",
+    "/q": "Save and exit",
+    "/clear": "Clear conversation (starts new session)",
+    "/save": "Save current session",
+    "/sessions": "List recent sessions",
+    "/resume": "Resume a specific session by ID",
+    "/models": "List available models",
+    "/model": "Switch to a different model",
+    "/todos": "Show current task list",
+    "/context": "Show token usage",
+    "/plan": "Enter/exit plan mode",
+    "/approve": "Approve pending plan",
+    "/reject": "Reject pending plan",
+}
+
+
+class SlashCommandCompleter(Completer):
+    """Autocomplete for slash commands."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+
+        # Only complete if starting with /
+        if not text.startswith("/"):
+            return
+
+        # Find matching commands
+        for cmd, description in SLASH_COMMANDS.items():
+            if cmd.startswith(text):
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display_meta=description,
+                )
+
+
+class StreamingPanel:
+    """Manages a Rich panel that updates during streaming."""
+
+    def __init__(self, console: Console, title: str = "SkyNet"):
+        self.console = console
+        self.title = title
+        self.content = ""
+        self.live: Live | None = None
+
+    def _render(self) -> Panel:
+        """Render current content as a panel."""
+        # Show cursor during streaming
+        display_content = self.content + "▌" if self.content else "▌"
+        return Panel(
+            Text(display_content),
+            title=f"[bold red]{self.title}[/bold red]",
+            border_style="red",
+            padding=(0, 1),
+        )
+
+    def start(self) -> None:
+        """Begin streaming output."""
+        self.content = ""
+        self.console.print()  # Newline before panel
+        self.live = Live(
+            self._render(),
+            console=self.console,
+            refresh_per_second=10,
+            transient=True,  # Remove when done so we can render final markdown
+        )
+        self.live.start()
+
+    def append(self, chunk: str) -> None:
+        """Append content and refresh display."""
+        self.content += chunk
+        if self.live:
+            self.live.update(self._render())
+
+    def finish(self) -> Panel:
+        """Complete streaming, return final content for markdown rendering."""
+        if self.live:
+            self.live.stop()
+            self.live = None
+        return self.content
+
+
+class StatusSpinner:
+    """Displays a spinner with status message."""
+
+    def __init__(self, console: Console):
+        self.console = console
+        self.live: Live | None = None
+        self.message = ""
+
+    def _render(self) -> Text:
+        """Render spinner with message."""
+        return Text.assemble(
+            ("⠋ ", "cyan"),
+            (self.message, "dim"),
+        )
+
+    def start(self, message: str) -> None:
+        """Start spinner with message."""
+        self.message = message
+        self.live = Live(
+            Spinner("dots", text=Text(message, style="dim")),
+            console=self.console,
+            refresh_per_second=10,
+            transient=True,
+        )
+        self.live.start()
+
+    def update(self, message: str) -> None:
+        """Update spinner message."""
+        self.message = message
+        if self.live:
+            self.live.update(Spinner("dots", text=Text(message, style="dim")))
+
+    def stop(self) -> None:
+        """Stop the spinner."""
+        if self.live:
+            self.live.stop()
+            self.live = None
 
 
 class ChatConsole:
@@ -12,6 +141,82 @@ class ChatConsole:
 
     def __init__(self):
         self.console = Console()
+        self._streaming_panel: StreamingPanel | None = None
+        self._status_spinner: StatusSpinner | None = None
+        self._completer = SlashCommandCompleter()
+        self._prompt_session: PromptSession | None = None
+
+    def _get_prompt_session(self) -> PromptSession:
+        """Get or create the prompt session."""
+        if self._prompt_session is None:
+            self._prompt_session = PromptSession(
+                completer=self._completer,
+                complete_while_typing=True,
+            )
+        return self._prompt_session
+
+    # === Status Spinner Methods ===
+
+    def start_status(self, message: str) -> None:
+        """Start or update the status spinner."""
+        if self._status_spinner is None:
+            self._status_spinner = StatusSpinner(self.console)
+        self._status_spinner.start(message)
+
+    def update_status(self, message: str) -> None:
+        """Update the status message without restarting."""
+        if self._status_spinner:
+            self._status_spinner.update(message)
+
+    def stop_status(self) -> None:
+        """Stop the status spinner."""
+        if self._status_spinner:
+            self._status_spinner.stop()
+
+    # === Streaming Methods ===
+
+    def start_streaming(self) -> None:
+        """Start streaming panel for real-time output."""
+        self.stop_status()  # Stop spinner when starting to stream
+        self._streaming_panel = StreamingPanel(self.console)
+        self._streaming_panel.start()
+
+    def stream_chunk(self, chunk: str) -> None:
+        """Append a chunk to the streaming output."""
+        if self._streaming_panel:
+            self._streaming_panel.append(chunk)
+
+    def finish_streaming(self) -> str:
+        """Finish streaming and render final content as markdown.
+
+        Returns the final content.
+        """
+        if self._streaming_panel:
+            content = self._streaming_panel.finish()
+            self._streaming_panel = None
+            # Render final content as proper markdown
+            if content:
+                try:
+                    md = Markdown(content)
+                    self.console.print(
+                        Panel(
+                            md,
+                            title="[bold red]SkyNet[/bold red]",
+                            border_style="red",
+                            padding=(0, 1),
+                        )
+                    )
+                except Exception:
+                    self.console.print(
+                        Panel(
+                            content,
+                            title="[bold red]SkyNet[/bold red]",
+                            border_style="red",
+                            padding=(0, 1),
+                        )
+                    )
+            return content
+        return ""
 
     def print_welcome(self, model: str, session_id: str | None = None) -> None:
         """Print welcome message."""
@@ -115,9 +320,116 @@ class ChatConsole:
         """Print an info message."""
         self.console.print(f"[dim]{message}[/dim]")
 
+    def print_todos(self) -> None:
+        """Print current todo list if any."""
+        from claude_clone.tools.todo import TodoManager
+
+        manager = TodoManager()
+        todos = manager.get_todos()
+
+        if not todos:
+            return
+
+        self.console.print()
+        lines = []
+        for todo in todos:
+            if todo.status == "completed":
+                lines.append(f"  [green][x][/green] [dim]{todo.content}[/dim]")
+            elif todo.status == "in_progress":
+                lines.append(f"  [cyan][>][/cyan] [bold]{todo.content}[/bold]")
+            else:
+                lines.append(f"  [dim][ ] {todo.content}[/dim]")
+
+        self.console.print(Panel(
+            "\n".join(lines),
+            title="[bold]Tasks[/bold]",
+            border_style="dim",
+            padding=(0, 1),
+        ))
+
+    def get_active_todo_message(self) -> str | None:
+        """Get the active todo message for status display."""
+        from claude_clone.tools.todo import TodoManager
+
+        manager = TodoManager()
+        active = manager.get_active()
+        if active:
+            return active.active_form
+        return None
+
     def print_warning(self, message: str) -> None:
         """Print a warning message."""
         self.console.print(f"[yellow]Warning:[/yellow] {message}")
+
+    def print_plan_mode_status(self, active: bool) -> None:
+        """Print plan mode status."""
+        if active:
+            self.console.print(
+                Panel(
+                    "[bold]Plan Mode Active[/bold]\n\n"
+                    "I will explore and create a plan for your approval.\n"
+                    "Only read-only operations are allowed until the plan is approved.\n\n"
+                    "[dim]Commands: /approve, /reject, /plan (to exit without plan)[/dim]",
+                    title="[yellow]Planning[/yellow]",
+                    border_style="yellow",
+                    padding=(0, 1),
+                )
+            )
+        else:
+            self.console.print("[dim]Exited plan mode.[/dim]")
+
+    def print_plan(self, plan_markdown: str) -> None:
+        """Print a plan."""
+        self.console.print()
+        self.console.print(
+            Panel(
+                Markdown(plan_markdown),
+                title="[bold cyan]Execution Plan[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+
+    def print_plan_approved(self) -> None:
+        """Print plan approved message."""
+        self.console.print("[bold green]Plan approved![/bold green] Beginning execution...")
+
+    def print_plan_rejected(self) -> None:
+        """Print plan rejected message."""
+        self.console.print("[yellow]Plan rejected.[/yellow] You can describe a different approach.")
+
+    def print_context_usage(self, used: int, max_tokens: int, percent: float) -> None:
+        """Print context token usage bar.
+
+        Args:
+            used: Tokens currently used.
+            max_tokens: Maximum context window size.
+            percent: Percentage of context used.
+        """
+        bar_width = 30
+        filled = int(bar_width * percent / 100)
+        empty = bar_width - filled
+
+        # Color based on usage level
+        if percent < 50:
+            color = "green"
+        elif percent < 75:
+            color = "yellow"
+        else:
+            color = "red"
+
+        bar = f"[{color}]{'█' * filled}[/{color}][dim]{'░' * empty}[/dim]"
+
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"{bar}\n\n"
+                f"[bold]{used:,}[/bold] / {max_tokens:,} tokens ({percent:.1f}%)",
+                title="[bold]Context Usage[/bold]",
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
 
     def confirm(self, message: str) -> bool:
         """Ask for user confirmation."""
@@ -125,12 +437,54 @@ class ChatConsole:
         response = input("[y/N]: ").strip().lower()
         return response in ("y", "yes")
 
-    def get_input(self, prompt: str = "> ") -> str:
-        """Get user input."""
+    def confirm_directory(self, directory: str, tool_name: str) -> bool:
+        """Ask for permission to execute tools in a directory.
+
+        This is similar to how Claude Code asks for directory-level permission
+        once, rather than asking for each individual tool call.
+        """
+        self.console.print()
+        self.console.print(
+            Panel(
+                f"[bold]{tool_name}[/bold] wants to operate in:\n\n"
+                f"  [cyan]{directory}[/cyan]\n\n"
+                f"[dim]Approving will allow all tool operations in this directory "
+                f"and its subdirectories for this session.[/dim]",
+                title="[yellow]Permission Required[/yellow]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        self.console.print("[yellow]Allow operations in this directory?[/yellow] ", end="")
+        response = input("[y/N]: ").strip().lower()
+        return response in ("y", "yes")
+
+    async def get_input_async(self, input_prompt: str = "> ") -> str:
+        """Get user input with slash command autocomplete (async version).
+
+        Type / to see available commands. Use Tab to autocomplete.
+        """
         try:
-            return input(prompt)
+            session = self._get_prompt_session()
+            return await session.prompt_async(input_prompt)
         except EOFError:
             return ""
+        except KeyboardInterrupt:
+            # Let the caller handle Ctrl+C
+            raise
+
+    def get_input(self, input_prompt: str = "> ") -> str:
+        """Get user input with slash command autocomplete (sync version).
+
+        Note: Use get_input_async() when in an async context.
+        """
+        try:
+            session = self._get_prompt_session()
+            return session.prompt(input_prompt)
+        except EOFError:
+            return ""
+        except KeyboardInterrupt:
+            raise
 
     def print_sessions(self, sessions: list) -> None:
         """Print a list of sessions."""
