@@ -1,7 +1,12 @@
 """Rich console wrapper for terminal output."""
 
+from datetime import datetime
+from typing import Any
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.formatted_text import FormattedText
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -9,6 +14,10 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
+
+from claude_clone.config import settings, permission_mode_manager
+from claude_clone.core.interrupt import interrupt_controller
+from claude_clone.ui.keybindings import KeyBindingManager
 
 
 # Slash commands with descriptions
@@ -146,14 +155,156 @@ class ChatConsole:
         self._completer = SlashCommandCompleter()
         self._prompt_session: PromptSession | None = None
 
+        # Status line data
+        self._status_data: dict[str, Any] = {
+            "context_used": 0,
+            "context_max": settings.num_ctx,
+            "model": settings.model,
+            "session_start": datetime.now(),
+        }
+
+        # Thinking display toggle
+        self._show_thinking = True
+
+        # Key binding manager
+        self._key_manager = KeyBindingManager()
+        self._setup_key_callbacks()
+
+        # History file
+        self._history = FileHistory(str(settings.history_file))
+
+    def _setup_key_callbacks(self) -> None:
+        """Set up callbacks for keyboard shortcuts."""
+        self._key_manager.register_callback("toggle_thinking", self._on_toggle_thinking)
+        self._key_manager.register_callback("cycle_permission", self._on_cycle_permission)
+        self._key_manager.register_callback("interrupt", self._on_interrupt)
+        self._key_manager.register_callback("edit_previous", self._on_edit_previous)
+
+    def _on_toggle_thinking(self, event) -> None:
+        """Handle Tab key - toggle thinking display."""
+        self._show_thinking = not self._show_thinking
+        # Force status bar refresh
+        event.app.invalidate()
+
+    def _on_cycle_permission(self, event) -> None:
+        """Handle Shift+Tab - cycle permission modes."""
+        permission_mode_manager.cycle()
+        # Force status bar refresh
+        event.app.invalidate()
+
+    def _on_interrupt(self, event) -> None:
+        """Handle Escape - signal interrupt."""
+        interrupt_controller.signal_interrupt_sync()
+        # Force status bar refresh
+        event.app.invalidate()
+
+    def _on_edit_previous(self, event) -> None:
+        """Handle double-Escape - load previous prompt for editing."""
+        buffer = event.app.current_buffer
+        history = list(self._history.load_history_strings())
+        if history:
+            buffer.text = history[-1]
+            buffer.cursor_position = len(buffer.text)
+
+    def _get_status_bar(self) -> FormattedText:
+        """Generate the bottom status bar content."""
+        # Context usage bar
+        used = self._status_data.get("context_used", 0)
+        max_ctx = self._status_data.get("context_max", settings.num_ctx)
+        percent = (used / max_ctx * 100) if max_ctx else 0
+
+        bar_width = 10
+        filled = int(bar_width * percent / 100)
+        empty = bar_width - filled
+
+        if percent < 50:
+            bar_color = "ansigreen"
+        elif percent < 75:
+            bar_color = "ansiyellow"
+        else:
+            bar_color = "ansired"
+
+        # Model name
+        model = self._status_data.get("model", settings.model)
+        # Truncate model name if too long
+        if len(model) > 20:
+            model = model[:17] + "..."
+
+        # Permission mode
+        mode_name, mode_color = permission_mode_manager.get_display_info()
+        mode_ansi = {"green": "ansigreen", "yellow": "ansiyellow", "cyan": "ansicyan"}.get(
+            mode_color, "ansiwhite"
+        )
+
+        # Session duration
+        duration = datetime.now() - self._status_data.get("session_start", datetime.now())
+        minutes, seconds = divmod(int(duration.total_seconds()), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            time_str = f"{hours}h {minutes}m"
+        else:
+            time_str = f"{minutes}m {seconds}s"
+
+        # Thinking indicator
+        think_indicator = "◉" if self._show_thinking else "○"
+
+        return FormattedText([
+            ("", " "),
+            (bar_color, "█" * filled),
+            ("ansigray", "░" * empty),
+            ("", f" {used:,}/{max_ctx:,}"),
+            ("", " │ "),
+            ("bold", model),
+            ("", " │ "),
+            (mode_ansi, f"● {mode_name}"),
+            ("", " │ "),
+            ("ansigray", f"{think_indicator} Think"),
+            ("", " │ "),
+            ("ansigray", time_str),
+            ("", " "),
+        ])
+
     def _get_prompt_session(self) -> PromptSession:
         """Get or create the prompt session."""
         if self._prompt_session is None:
             self._prompt_session = PromptSession(
                 completer=self._completer,
                 complete_while_typing=True,
+                key_bindings=self._key_manager.get_bindings(),
+                bottom_toolbar=self._get_status_bar,
+                history=self._history,
+                enable_history_search=True,  # Ctrl+R support
             )
         return self._prompt_session
+
+    def update_status_bar(self, **kwargs) -> None:
+        """Update status bar data.
+
+        Args:
+            context_used: Current token usage
+            context_max: Maximum context size
+            model: Current model name
+        """
+        self._status_data.update(kwargs)
+
+    def print_thinking(self, content: str) -> None:
+        """Print thinking/reasoning process in italic gray style."""
+        if not self._show_thinking:
+            return
+
+        self.console.print(
+            Panel(
+                Text(content, style="italic dim"),
+                title="[dim]Thinking...[/dim]",
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
+
+    @property
+    def show_thinking(self) -> bool:
+        """Whether thinking display is enabled."""
+        return self._show_thinking
 
     # === Status Spinner Methods ===
 

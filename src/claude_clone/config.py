@@ -1,10 +1,58 @@
 """Configuration management for Claude Clone."""
 
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PermissionMode(Enum):
+    """Permission modes for tool execution."""
+
+    NORMAL = "normal"  # Ask for each operation
+    AUTO_ACCEPT = "auto_accept"  # Accept all operations automatically
+    PLAN_MODE = "plan_mode"  # Read-only until plan approved
+
+
+class PermissionModeManager:
+    """Manages permission mode state with cycling.
+
+    Singleton pattern for consistent state across the application.
+    """
+
+    _instance = None
+    _MODES = [PermissionMode.NORMAL, PermissionMode.AUTO_ACCEPT, PermissionMode.PLAN_MODE]
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._current = PermissionMode.NORMAL
+        return cls._instance
+
+    @property
+    def current(self) -> PermissionMode:
+        """Get current permission mode."""
+        return self._current
+
+    def cycle(self) -> PermissionMode:
+        """Cycle to the next permission mode."""
+        idx = self._MODES.index(self._current)
+        self._current = self._MODES[(idx + 1) % len(self._MODES)]
+        return self._current
+
+    def set_mode(self, mode: PermissionMode) -> None:
+        """Set a specific permission mode."""
+        self._current = mode
+
+    def get_display_info(self) -> tuple[str, str]:
+        """Return (short_name, color) for status display."""
+        return {
+            PermissionMode.NORMAL: ("Normal", "green"),
+            PermissionMode.AUTO_ACCEPT: ("Auto", "yellow"),
+            PermissionMode.PLAN_MODE: ("Plan", "cyan"),
+        }[self._current]
 
 
 class Settings(BaseSettings):
@@ -95,3 +143,6 @@ def get_model_config(model: str) -> dict[str, Any]:
 
 # Global settings instance
 settings = Settings()
+
+# Global permission mode manager
+permission_mode_manager = PermissionModeManager()

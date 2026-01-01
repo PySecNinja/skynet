@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from claude_clone.config import Settings
+from claude_clone.config import Settings, PermissionMode, permission_mode_manager
 from claude_clone.core.context import ContextManager
+from claude_clone.core.interrupt import interrupt_controller, InterruptType
 from claude_clone.core.plan import PlanManager
 from claude_clone.llm.ollama_provider import (
     ChatChunk,
@@ -66,6 +67,9 @@ class Agent:
 
     async def process_message(self, user_input: str) -> None:
         """Process a user message and generate response with tool execution."""
+        # Clear any pending interrupt
+        await interrupt_controller.clear()
+
         # Check if summarization is needed before adding new message
         if self.context_manager.should_summarize(self.messages):
             self.console.print_info("Context limit approaching, summarizing conversation...")
@@ -80,8 +84,9 @@ class Agent:
         # Agentic loop - keep going until we get a final response
         max_iterations = 10
         iteration = 0
+        interrupted = False
 
-        while iteration < max_iterations:
+        while iteration < max_iterations and not interrupted:
             iteration += 1
 
             # Get response from LLM with streaming
@@ -98,6 +103,16 @@ class Agent:
                 tools=tools,
                 stream=True,  # Enable streaming for real-time output
             ):
+                # Check for interrupt during streaming
+                if await interrupt_controller.check_interrupted() != InterruptType.NONE:
+                    interrupted = True
+                    self.console.stop_status()
+                    if streaming_started:
+                        self.console._streaming_panel.finish()
+                        self.console._streaming_panel = None
+                    self.console.print_warning("Interrupted by user.")
+                    break
+
                 if chunk.content:
                     response_content += chunk.content
 
@@ -127,6 +142,10 @@ class Agent:
 
                 if chunk.tool_calls:
                     tool_calls.extend(chunk.tool_calls)
+
+            # If interrupted during streaming, break out of the main loop
+            if interrupted:
+                break
 
             # Stop spinner if we never started streaming
             if not streaming_started:
@@ -162,6 +181,12 @@ class Agent:
 
                 # Execute each tool and add results
                 for tc in tool_calls:
+                    # Check for interrupt before each tool
+                    if await interrupt_controller.check_interrupted() != InterruptType.NONE:
+                        interrupted = True
+                        self.console.print_warning("Interrupted by user.")
+                        break
+
                     self.console.print_tool_call(tc.name, tc.arguments)
 
                     # Check if tool is allowed in plan mode
@@ -224,6 +249,10 @@ class Agent:
                         )
                     )
 
+                # If interrupted during tool execution, break out
+                if interrupted:
+                    break
+
                 # Continue the loop to get next response
                 continue
 
@@ -280,8 +309,21 @@ class Agent:
                 f"Reached maximum iterations ({max_iterations}). Stopping."
             )
 
+        # Update status line with final context usage
+        self._update_context_status()
+
     def _requires_confirmation(self, tool_name: str, arguments: dict[str, Any]) -> bool:
         """Check if a tool execution requires user confirmation."""
+        # Check permission mode first
+        mode = permission_mode_manager.current
+
+        # Auto-accept mode skips all confirmations
+        if mode == PermissionMode.AUTO_ACCEPT:
+            return False
+
+        # Plan mode should block writes (handled separately), but still ask for confirmations
+        # on any operations that do get through
+
         # File writes need confirmation
         if tool_name in ("write_file", "edit_file") and self.settings.confirm_writes:
             return True
@@ -305,6 +347,15 @@ class Agent:
             return True
 
         return False
+
+    def _update_context_status(self) -> None:
+        """Update the console status bar with current context usage."""
+        usage = self.get_context_usage()
+        self.console.update_status_bar(
+            context_used=usage.used,
+            context_max=usage.max_tokens,
+            model=self.provider.model,
+        )
 
     def _get_tool_directory(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Extract the target directory from tool arguments."""
