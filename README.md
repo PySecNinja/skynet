@@ -28,7 +28,7 @@ A powerful local AI coding assistant CLI powered by Ollama. Like Claude Code, bu
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/skynet.git
+git clone https://github.com/PySecNinja/skynet.git
 cd skynet
 
 # Install in editable mode
