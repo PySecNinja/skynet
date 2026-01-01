@@ -18,32 +18,121 @@ def extract_json_tool_call(content: str) -> tuple[str | None, list["ToolCall"]]:
     Some models (like qwen2.5-coder) output tool calls as JSON in the content field
     instead of using Ollama's native tool_calls format.
 
+    Handles multiple formats:
+    1. {"name": "tool_name", "arguments": {...}}
+    2. tool_name {...}  (tool name followed by JSON arguments)
+    3. tool_name({...}) (function call style)
+
     Returns (remaining_content, tool_calls)
     """
     tool_calls = []
+    matches = []
 
-    # Try to find JSON tool call patterns
-    # Pattern 1: {"name": "tool_name", "arguments": {...}}
-    json_pattern = r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}'
+    # Known tool names to look for
+    known_tools = [
+        "read_file", "write_file", "edit_file", "grep", "glob",
+        "bash", "git_status", "git_diff", "git_commit", "git_log", "git_branch",
+        "web_search", "web_fetch", "create_plan", "todo_write"
+    ]
 
-    matches = list(re.finditer(json_pattern, content, re.DOTALL))
+    def find_balanced_json(text: str, start_idx: int) -> tuple[str | None, int]:
+        """Find a balanced JSON object starting at start_idx. Returns (json_str, end_idx) or (None, -1)."""
+        if start_idx >= len(text) or text[start_idx] != '{':
+            return None, -1
 
-    for match in matches:
-        try:
-            data = json.loads(match.group())
-            if "name" in data and "arguments" in data:
-                tool_calls.append(ToolCall(
-                    name=data["name"],
-                    arguments=data["arguments"] if isinstance(data["arguments"], dict) else {}
-                ))
-        except json.JSONDecodeError:
-            continue
+        brace_count = 0
+        bracket_count = 0
+        in_string = False
+        escape_next = False
+        j = start_idx
+
+        while j < len(text):
+            char = text[j]
+
+            if escape_next:
+                escape_next = False
+                j += 1
+                continue
+
+            if char == '\\' and in_string:
+                escape_next = True
+                j += 1
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+            elif not in_string:
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return text[start_idx:j + 1], j + 1
+                elif char == '[':
+                    bracket_count += 1
+                elif char == ']':
+                    bracket_count -= 1
+
+            j += 1
+
+        return None, -1
+
+    # First, try to find {"name": ..., "arguments": ...} format
+    i = 0
+    while i < len(content):
+        if content[i] == '{':
+            json_str, end_idx = find_balanced_json(content, i)
+            if json_str:
+                try:
+                    data = json.loads(json_str)
+                    if isinstance(data, dict) and "name" in data and "arguments" in data:
+                        tool_calls.append(ToolCall(
+                            name=data["name"],
+                            arguments=data["arguments"] if isinstance(data["arguments"], dict) else {}
+                        ))
+                        matches.append((i, end_idx))
+                        i = end_idx
+                        continue
+                except json.JSONDecodeError:
+                    pass
+            i += 1
+        else:
+            i += 1
+
+    # If no standard format found, try "tool_name {...}" or "tool_name({...})" formats
+    if not tool_calls:
+        for tool_name in known_tools:
+            # Pattern: tool_name { ... } or tool_name({ ... })
+            patterns = [
+                (tool_name + r'\s*\(\s*\{', 2),  # tool_name({ - need to skip "(" before "{"
+                (tool_name + r'\s*\{', 0),       # tool_name { - brace immediately follows
+            ]
+
+            for pattern, offset_adjust in patterns:
+                for match in re.finditer(pattern, content):
+                    # Find the opening brace
+                    brace_start = match.end() - 1
+                    json_str, end_idx = find_balanced_json(content, brace_start)
+
+                    if json_str:
+                        try:
+                            args = json.loads(json_str)
+                            if isinstance(args, dict):
+                                tool_calls.append(ToolCall(name=tool_name, arguments=args))
+                                # Adjust match bounds to include tool name and optional parens
+                                match_end = end_idx
+                                # Check for closing paren if we had opening paren
+                                if offset_adjust == 2 and match_end < len(content) and content[match_end:match_end+1] == ')':
+                                    match_end += 1
+                                matches.append((match.start(), match_end))
+                        except json.JSONDecodeError:
+                            pass
 
     # If we found tool calls, remove them from content
     if tool_calls:
         remaining = content
-        for match in reversed(matches):  # Reverse to maintain positions
-            remaining = remaining[:match.start()] + remaining[match.end():]
+        for start, end in reversed(sorted(matches)):  # Sort and reverse to maintain positions
+            remaining = remaining[:start] + remaining[end:]
         remaining = remaining.strip()
         return remaining if remaining else None, tool_calls
 

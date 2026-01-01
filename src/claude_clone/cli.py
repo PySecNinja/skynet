@@ -118,6 +118,18 @@ async def run_repl(
         try:
             user_input = await console.get_input_async("\n> ")
 
+            # Handle EOF (None) - exit gracefully
+            if user_input is None:
+                if len(agent.messages) > 1:  # More than just system prompt
+                    session_id = session_manager.save_session(
+                        agent.messages,
+                        settings.model,
+                        current_session_id,
+                    )
+                    console.print_session_saved(session_id)
+                console.print_info("Goodbye!")
+                break
+
             if not user_input.strip():
                 continue
 
@@ -342,9 +354,40 @@ def main(
     console = ChatConsole()
 
     if prompt:
-        # Single prompt mode - not implemented yet
-        console.print_error("Single prompt mode not yet implemented. Use interactive mode.")
-        sys.exit(1)
+        # Single prompt mode - run once and exit
+        async def run_single_prompt():
+            cwd = Path.cwd()
+            provider = OllamaProvider(
+                model=settings.model,
+                host=settings.ollama_host,
+                settings=settings,
+            )
+            if not await provider.check_connection():
+                console.print_error(
+                    f"Cannot connect to Ollama at {settings.ollama_host}. "
+                    "Make sure Ollama is running."
+                )
+                sys.exit(1)
+
+            registry = ToolRegistry()
+            registry.register_default_tools()
+
+            agent = Agent(
+                provider=provider,
+                registry=registry,
+                console=console,
+                system_prompt=get_system_prompt(cwd),
+                settings=settings,
+            )
+
+            console.print_user_message(prompt)
+            await agent.process_message(prompt)
+
+        try:
+            asyncio.run(run_single_prompt())
+        except KeyboardInterrupt:
+            pass
+        return
 
     # Determine which session to resume
     resume_session = None

@@ -459,16 +459,18 @@ class ChatConsole:
         response = input("[y/N]: ").strip().lower()
         return response in ("y", "yes")
 
-    async def get_input_async(self, input_prompt: str = "> ") -> str:
+    async def get_input_async(self, input_prompt: str = "> ") -> str | None:
         """Get user input with slash command autocomplete (async version).
 
         Type / to see available commands. Use Tab to autocomplete.
+
+        Returns None on EOF to signal the REPL should exit.
         """
         try:
             session = self._get_prompt_session()
             return await session.prompt_async(input_prompt)
         except EOFError:
-            return ""
+            return None  # Signal EOF to caller
         except KeyboardInterrupt:
             # Let the caller handle Ctrl+C
             raise
