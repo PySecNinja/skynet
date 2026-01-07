@@ -166,6 +166,9 @@ class ChatConsole:
         # Thinking display toggle
         self._show_thinking = True
 
+        # Collapsed content tracking for expand feature
+        self._collapsed_results: list[dict] = []
+
         # Key binding manager
         self._key_manager = KeyBindingManager()
         self._setup_key_callbacks()
@@ -179,6 +182,7 @@ class ChatConsole:
         self._key_manager.register_callback("cycle_permission", self._on_cycle_permission)
         self._key_manager.register_callback("interrupt", self._on_interrupt)
         self._key_manager.register_callback("edit_previous", self._on_edit_previous)
+        self._key_manager.register_callback("expand_content", self._on_expand_content)
 
     def _on_toggle_thinking(self, event) -> None:
         """Handle Tab key - toggle thinking display."""
@@ -205,6 +209,94 @@ class ChatConsole:
         if history:
             buffer.text = history[-1]
             buffer.cursor_position = len(buffer.text)
+
+    def _on_expand_content(self, event) -> None:
+        """Handle Ctrl+O - expand last collapsed content."""
+        if self._collapsed_results:
+            last = self._collapsed_results[-1]
+            self.console.print()
+            self.console.print("[dim]── Expanded content ──[/dim]")
+            self.console.print(last.get("full_content", ""))
+            self.console.print("[dim]── End expanded ──[/dim]")
+
+    def _get_tool_display_info(self, tool_name: str, arguments: dict) -> tuple[str, str]:
+        """Return (display_name, primary_arg) for tool call display.
+
+        Maps internal tool names to Claude Code-style display names and
+        extracts the most relevant argument to show.
+        """
+        # Tool name mappings
+        name_map = {
+            "write_file": "Write",
+            "read_file": "Read",
+            "edit_file": "Edit",
+            "bash": "Bash",
+            "execute_command": "Bash",
+            "search": "Grep",
+            "grep": "Grep",
+            "glob": "Glob",
+            "todo_write": "TodoWrite",
+            "create_plan": "Plan",
+            "git_commit": "GitCommit",
+            "git_status": "GitStatus",
+            "git_diff": "GitDiff",
+        }
+
+        display_name = name_map.get(tool_name, tool_name.title().replace("_", ""))
+
+        # Extract primary argument based on tool type
+        primary_arg = ""
+        if tool_name in ("write_file", "read_file", "edit_file"):
+            path = arguments.get("path", arguments.get("file_path", ""))
+            primary_arg = path
+        elif tool_name in ("bash", "execute_command"):
+            cmd = arguments.get("command", "")
+            # Truncate long commands
+            if len(cmd) > 50:
+                cmd = cmd[:47] + "..."
+            primary_arg = cmd
+        elif tool_name in ("search", "grep"):
+            primary_arg = arguments.get("pattern", arguments.get("query", ""))
+        elif tool_name == "glob":
+            primary_arg = arguments.get("pattern", "")
+        elif tool_name == "todo_write":
+            # Don't show args for todo, just the count
+            todos = arguments.get("todos", [])
+            if todos:
+                primary_arg = f"{len(todos)} items"
+
+        return display_name, primary_arg
+
+    def _format_file_preview(self, content: str, max_lines: int = 5) -> tuple[str, int]:
+        """Format file content with line numbers and collapse indicator.
+
+        Returns:
+            tuple: (formatted_preview, total_lines)
+        """
+        lines = content.split("\n")
+        total_lines = len(lines)
+
+        if total_lines == 0:
+            return "", 0
+
+        # Calculate line number padding
+        max_line_num = min(max_lines, total_lines)
+        padding = len(str(total_lines))
+
+        preview_parts = []
+        for i, line in enumerate(lines[:max_lines], 1):
+            # Truncate very long lines
+            display_line = line[:100] + "..." if len(line) > 100 else line
+            preview_parts.append(f"     {i:>{padding}} {display_line}")
+
+        preview = "\n".join(preview_parts)
+
+        # Add collapse indicator if there are more lines
+        remaining = total_lines - max_lines
+        if remaining > 0:
+            preview += f"\n     [dim]... +{remaining} lines (ctrl+o to expand)[/dim]"
+
+        return preview, total_lines
 
     def _get_status_bar(self) -> FormattedText:
         """Generate the bottom status bar content."""
@@ -432,36 +524,58 @@ class ChatConsole:
         self.console.print()
 
     def print_tool_call(self, tool_name: str, arguments: dict) -> None:
-        """Print a tool invocation."""
-        self.console.print()
-        args_str = ", ".join(f"{k}={repr(v)[:50]}" for k, v in arguments.items())
-        self.console.print(
-            f"[dim cyan]> Calling tool:[/dim cyan] [bold]{tool_name}[/bold]({args_str})"
-        )
+        """Print a tool invocation in Claude Code style."""
+        display_name, primary_arg = self._get_tool_display_info(tool_name, arguments)
 
-    def print_tool_result(self, output: str, success: bool = True) -> None:
-        """Print tool execution result."""
-        # Truncate long output
-        display_output = output[:2000] + "..." if len(output) > 2000 else output
-
-        if success:
+        # Format: ● ToolName(primary_arg)
+        if primary_arg:
             self.console.print(
-                Panel(
-                    Syntax(display_output, "text", theme="monokai", word_wrap=True),
-                    title="[cyan]Tool Result[/cyan]",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
+                f"[dim]●[/dim] [bold cyan]{display_name}[/bold cyan]({primary_arg})"
             )
         else:
             self.console.print(
-                Panel(
-                    Text(display_output, style="red"),
-                    title="[red]Tool Error[/red]",
-                    border_style="red",
-                    padding=(0, 1),
-                )
+                f"[dim]●[/dim] [bold cyan]{display_name}[/bold cyan]"
             )
+
+    def print_tool_result(
+        self,
+        output: str,
+        success: bool = True,
+        file_path: str | None = None,
+        content: str | None = None,
+        tool_name: str | None = None,
+    ) -> None:
+        """Print tool execution result in Claude Code style.
+
+        Args:
+            output: The tool output/summary message
+            success: Whether the tool succeeded
+            file_path: Optional file path for file operations
+            content: Optional file content for preview
+            tool_name: Optional tool name for context-aware formatting
+        """
+        if success:
+            # Format the summary line with tree connector
+            self.console.print(f"  [dim]⎿[/dim]  {output}")
+
+            # If we have file content, show a preview
+            if content:
+                preview, total_lines = self._format_file_preview(content, max_lines=5)
+                if preview:
+                    self.console.print(preview)
+                    # Store for expand feature if content was collapsed
+                    if total_lines > 5:
+                        self._collapsed_results.append({
+                            "file_path": file_path,
+                            "full_content": content,
+                            "total_lines": total_lines,
+                        })
+                        # Keep only last 10 collapsed results
+                        if len(self._collapsed_results) > 10:
+                            self._collapsed_results.pop(0)
+        else:
+            # Error output - simple red text with tree connector
+            self.console.print(f"  [dim]⎿[/dim]  [red]Error: {output}[/red]")
 
     def print_error(self, message: str) -> None:
         """Print an error message."""

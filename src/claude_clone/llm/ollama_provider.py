@@ -77,11 +77,18 @@ def extract_json_tool_call(content: str) -> tuple[str | None, list["ToolCall"]]:
 
         return None, -1
 
+    # Clean up common model artifacts before parsing
+    # Remove control tokens like <|im_start|>, <|im_end|>
+    cleaned = re.sub(r'<\|[^|]+\|>', '', content)
+    # Fix malformed JSON: {name": -> {"name":
+    cleaned = re.sub(r'\{name":', '{"name":', cleaned)
+    cleaned = re.sub(r'\{name" :', '{"name":', cleaned)
+
     # First, try to find {"name": ..., "arguments": ...} format
     i = 0
-    while i < len(content):
-        if content[i] == '{':
-            json_str, end_idx = find_balanced_json(content, i)
+    while i < len(cleaned):
+        if cleaned[i] == '{':
+            json_str, end_idx = find_balanced_json(cleaned, i)
             if json_str:
                 try:
                     data = json.loads(json_str)
@@ -109,10 +116,10 @@ def extract_json_tool_call(content: str) -> tuple[str | None, list["ToolCall"]]:
             ]
 
             for pattern, offset_adjust in patterns:
-                for match in re.finditer(pattern, content):
+                for match in re.finditer(pattern, cleaned):
                     # Find the opening brace
                     brace_start = match.end() - 1
-                    json_str, end_idx = find_balanced_json(content, brace_start)
+                    json_str, end_idx = find_balanced_json(cleaned, brace_start)
 
                     if json_str:
                         try:
@@ -122,21 +129,23 @@ def extract_json_tool_call(content: str) -> tuple[str | None, list["ToolCall"]]:
                                 # Adjust match bounds to include tool name and optional parens
                                 match_end = end_idx
                                 # Check for closing paren if we had opening paren
-                                if offset_adjust == 2 and match_end < len(content) and content[match_end:match_end+1] == ')':
+                                if offset_adjust == 2 and match_end < len(cleaned) and cleaned[match_end:match_end+1] == ')':
                                     match_end += 1
                                 matches.append((match.start(), match_end))
                         except json.JSONDecodeError:
                             pass
 
-    # If we found tool calls, remove them from content
+    # If we found tool calls, remove them from cleaned content
     if tool_calls:
-        remaining = content
+        remaining = cleaned
         for start, end in reversed(sorted(matches)):  # Sort and reverse to maintain positions
             remaining = remaining[:start] + remaining[end:]
         remaining = remaining.strip()
         return remaining if remaining else None, tool_calls
 
-    return content, []
+    # Return cleaned content even if no tool calls (removes control tokens)
+    cleaned = cleaned.strip()
+    return cleaned if cleaned else content, []
 
 
 @dataclass

@@ -66,6 +66,12 @@ class KeyBindingManager:
 
             self._last_escape_time = current_time
 
+        # Ctrl+O - Expand last collapsed content
+        @self.bindings.add("c-o")
+        def handle_ctrl_o(event) -> None:
+            if "expand_content" in self._callbacks:
+                self._callbacks["expand_content"](event)
+
     def register_callback(self, action: str, callback: Callable) -> None:
         """Register a callback for a keyboard action.
 

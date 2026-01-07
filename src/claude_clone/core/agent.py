@@ -94,6 +94,7 @@ class Agent:
             tool_calls: list[ToolCall] = []
             streaming_started = False
             looks_like_tool_call = False
+            repetition_detected = False
 
             # Show spinner while waiting for first response
             self.console.start_status("Thinking...")
@@ -119,18 +120,33 @@ class Agent:
                     # Check if this looks like a JSON tool call (don't stream it)
                     # Some models output tool calls as JSON in content
                     stripped = response_content.strip()
-                    # Detect various stages of JSON tool call output
-                    # Be aggressive about not streaming potential JSON tool calls
-                    if stripped.startswith("{"):
-                        # If we see clear signs of a tool call
+
+                    # Detect model control tokens that shouldn't be displayed
+                    if '<|im_start|>' in stripped or '<|im_end|>' in stripped:
+                        looks_like_tool_call = True
+                    # Detect JSON tool calls at the start
+                    elif stripped.startswith("{"):
                         if ('"name"' in stripped or
-                            '"name' in stripped or  # Partial quote
+                            '"name' in stripped or
                             'name":' in stripped or
                             '"arguments"' in stripped):
                             looks_like_tool_call = True
-                        # If it's very short and starts with JSON, wait to see more
                         elif len(stripped) < 80:
                             looks_like_tool_call = True
+                    # Detect JSON tool calls appearing mid-content
+                    elif '{"name":' in stripped or '{"name" :' in stripped:
+                        looks_like_tool_call = True
+
+                    # Detect repetition (model stuck in loop)
+                    # Check if the same pattern appears multiple times
+                    if len(stripped) > 500:
+                        # Look for repeated JSON patterns
+                        if stripped.count('{"name":') > 2 or stripped.count('"arguments"') > 2:
+                            repetition_detected = True
+                            self.console.print_warning(
+                                "Model appears to be repeating itself. Stopping generation."
+                            )
+                            break
 
                     # Only stream if it doesn't look like a tool call
                     if not looks_like_tool_call:
@@ -147,6 +163,13 @@ class Agent:
             if interrupted:
                 break
 
+            # If repetition detected, clean up and try to extract what we can
+            if repetition_detected:
+                self.console.stop_status()
+                if streaming_started and self.console._streaming_panel:
+                    self.console._streaming_panel.finish()
+                    self.console._streaming_panel = None
+
             # Stop spinner if we never started streaming
             if not streaming_started:
                 self.console.stop_status()
@@ -158,6 +181,18 @@ class Agent:
                 if parsed_calls:
                     tool_calls = parsed_calls
                     response_content = remaining_content or ""
+
+            # Deduplicate tool calls - some models output the same call multiple times
+            if tool_calls:
+                seen = set()
+                unique_calls = []
+                for tc in tool_calls:
+                    # Create a key from name and serialized arguments
+                    key = (tc.name, str(sorted(tc.arguments.items()) if tc.arguments else []))
+                    if key not in seen:
+                        seen.add(key)
+                        unique_calls.append(tc)
+                tool_calls = unique_calls
 
             # Finish streaming if we started (and we have real content, not tool calls)
             if streaming_started and response_content and not tool_calls:
@@ -239,7 +274,30 @@ class Agent:
 
                     # Stop status spinner and show result
                     self.console.stop_status()
-                    self.console.print_tool_result(result.output, result.success)
+
+                    # Extract additional context for display
+                    file_path = result.metadata.get("path") or tc.arguments.get("file_path") or tc.arguments.get("path")
+                    content = None
+
+                    # For write operations, include the content for preview
+                    if tc.name == "write_file":
+                        content = tc.arguments.get("content", "")
+                        lines_count = len(content.split("\n")) if content else 0
+                        # Update output message to be more Claude Code-like
+                        if result.success:
+                            result_output = f"Wrote {lines_count} lines to {file_path}"
+                        else:
+                            result_output = result.output
+                    else:
+                        result_output = result.output
+
+                    self.console.print_tool_result(
+                        result_output,
+                        result.success,
+                        file_path=file_path,
+                        content=content,
+                        tool_name=tc.name,
+                    )
 
                     # Add tool result to conversation
                     self.messages.append(
